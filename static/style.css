@@ -142,3 +142,21 @@ body.hasp .w{padding-bottom:calc(var(--plh,120px) + 40px)}
 #pl.vid.mini .pl-bar{align-self:center}
 @media(max-width:700px){#pl.vid.mini{grid-template-columns:1fr}}
 
+/* ---- Seção "Mais Escutadas" ---- */
+.me-sec{margin:0 0 24px}
+.me-titulo-sec{font-size:18px;font-weight:800;margin:0 0 12px;letter-spacing:-.01em}
+.me-lista{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.me-lista::-webkit-scrollbar{height:4px}
+.me-lista::-webkit-scrollbar-track{background:transparent}
+.me-lista::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
+.me-card{display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 10px;min-width:130px;max-width:130px;position:relative;cursor:default;text-align:center;flex-shrink:0}
+.me-pos{position:absolute;top:8px;left:10px;font-size:11px;font-weight:800;color:var(--mute);line-height:1}
+.me-capa{width:72px;height:72px;border-radius:12px;object-fit:cover;flex:none}
+.me-sem-capa{background:linear-gradient(135deg,hsl(var(--h) 90% 45%),hsl(calc(var(--h) + 50) 85% 28%))}
+.me-info{display:flex;flex-direction:column;gap:2px;width:100%;min-width:0}
+.me-titulo{font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.me-artista{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.me-views{font-size:11px;display:block}
+.me-acoes{margin-top:2px}
+.me-acoes .chip{padding:5px 14px;font-size:13px}
+
