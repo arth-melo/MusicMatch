@@ -1112,8 +1112,9 @@ function htmlMaisEscutadas() {
   }
   const cards = maisEscutadas.map((faixa, posicao) => {
     const k = registrarFaixa(faixa);
-    const capa = faixa.c
-      ? `<img src="${escapar(faixa.c)}" alt="" class="me-capa">`
+    const imagemUrl = faixa.c || FOTOS[faixa.a] || "";
+    const capa = imagemUrl
+      ? `<img src="${escapar(imagemUrl)}" alt="" class="me-capa">`
       : `<div class="me-capa me-sem-capa" style="--h:${matizPorNome(faixa.a)}"></div>`;
     return `<div class="me-card glass">
       <span class="me-pos">${posicao + 1}</span>
@@ -1979,4 +1980,18 @@ addEventListener("keydown", (e) => {
 });
 
 // Desenha a tela pela primeira vez.
-carregarDados().then((d) => { dados = d; carregarMaisEscutadas(); renderizar(); });
+carregarDados().then(async (d) => {
+  dados = d;
+  await carregarMaisEscutadas();
+  // Pré-carrega as fotos dos artistas do top para que htmlMaisEscutadas()
+  // já as encontre em FOTOS no segundo renderizar().
+  await Promise.all(
+    [...new Set(maisEscutadas.map((f) => f.a))]
+      .filter((nome) => FOTOS[nome] === undefined)
+      .map(async (nome) => {
+        FOTOS[nome] = null;
+        FOTOS[nome] = await buscarFoto(nome);
+      })
+  );
+  renderizar();
+});
