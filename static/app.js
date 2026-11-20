@@ -234,6 +234,18 @@ function mostrarAviso(texto) {
   setTimeout(() => d.remove(), 2200);
 }
 
+// Registra uma visualização de faixa no servidor (fire-and-forget).
+// Aceita um objeto faixa com { t, a, c, u } ou strings soltas.
+function registrarVisualizacao(faixa) {
+  if (!faixa || !faixa.t || !faixa.a) return;
+  fetch("/api/visualizacao", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ t: faixa.t, a: faixa.a, c: faixa.c || "", u: faixa.u || "" }),
+  }).catch(() => {}); // falha silenciosa — contagem não é crítica
+}
+
 
 /* =====================================================================
    3. DADOS E PERSISTÊNCIA
@@ -343,6 +355,22 @@ const usuarioAtual = () => dados.u.find((u) => u.id === dados.a);
 let resultadosBusca = [];
 let statusBusca = "";
 let timerBusca = null;
+
+// Mais Escutadas: lista carregada do servidor e flag de carregamento.
+let maisEscutadas = [];
+let maisEscutadasCarregadas = false;
+
+// Busca o top de músicas mais visualizadas do servidor (chamada uma vez no boot).
+async function carregarMaisEscutadas() {
+  try {
+    const r = await fetch("/api/mais-escutadas?limit=10", { credentials: "same-origin" });
+    if (!r.ok) return;
+    maisEscutadas = await r.json();
+    maisEscutadasCarregadas = true;
+  } catch {
+    // falha silenciosa
+  }
+}
 
 // Todas as faixas que já apareceram na tela ficam registradas aqui.
 // Os botões guardam só o índice (data-k) e o código busca a faixa neste vetor.
@@ -1077,6 +1105,36 @@ async function carregarFotos() {
   await Promise.all([trabalhador(), trabalhador(), trabalhador(), trabalhador()]);
 }
 
+// HTML da seção "Mais Escutadas" (top de faixas visualizadas).
+function htmlMaisEscutadas() {
+  if (!maisEscutadasCarregadas || !maisEscutadas.length) {
+    return `<div id="me-sec"></div>`;
+  }
+  const cards = maisEscutadas.map((faixa, posicao) => {
+    const k = registrarFaixa(faixa);
+    const imagemUrl = faixa.c || FOTOS[faixa.a] || "";
+    const capa = imagemUrl
+      ? `<img src="${escapar(imagemUrl)}" alt="" class="me-capa">`
+      : `<div class="me-capa me-sem-capa" style="--h:${matizPorNome(faixa.a)}"></div>`;
+    return `<div class="me-card glass">
+      <span class="me-pos">${posicao + 1}</span>
+      ${capa}
+      <div class="me-info">
+        <b class="me-titulo">${escapar(faixa.t)}</b>
+        <span class="me-artista m">${escapar(faixa.a)}</span>
+        <span class="me-views m">👁 ${faixa.visualizacoes}</span>
+      </div>
+      <div class="me-acoes">
+        <button class="chip" data-a="play" data-k="${k}" aria-label="Tocar prévia de 30 segundos">▶</button>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div id="me-sec" class="me-sec">
+    <h2 class="me-titulo-sec">🔥 Mais Escutadas</h2>
+    <div class="me-lista">${cards}</div>
+  </div>`;
+}
+
 // HTML da seção "Músicas no iTunes" (resultados da busca digitada).
 function htmlResultadosBusca() {
   const texto = textoBusca.trim();
@@ -1353,6 +1411,7 @@ function paginaInicio(u) {
       <p class="m">Bandas e músicas sugeridas para você. Números de ouvintes são valores de exemplo.</p></div>
       <button class="btn o" data-a="moregen">＋ Adicionar gêneros</button></div>
     <input id="q" type="search" placeholder="Pesquisar banda ou música (catálogo do site e iTunes)" aria-label="Pesquisar banda" value="${escapar(textoBusca)}" style="margin:0 0 16px">
+    ${htmlMaisEscutadas()}
     <div class="chips">${["Todos", ...u.gen].map((g) => `<button class="chip" data-a="flt" data-g="${escapar(g)}" aria-pressed="${filtroGenero === g}">${escapar(g)}</button>`).join("")}</div>
     <div class="grid" id="gr">${htmlGradeBandas(u)}</div>
     <div id="sr">${htmlResultadosBusca()}</div>`;
@@ -1613,6 +1672,8 @@ raiz.addEventListener("click", (e) => {
       const posicao = indices.indexOf(+d.k);
       modal = null;
       iniciarFila(indices.map((k) => FAIXAS[k]), posicao < 0 ? 0 : posicao, d.m);
+      // Registra visualização da faixa clicada.
+      registrarVisualizacao(FAIXAS[+d.k]);
       break;
     }
 
@@ -1919,4 +1980,18 @@ addEventListener("keydown", (e) => {
 });
 
 // Desenha a tela pela primeira vez.
-carregarDados().then((d) => { dados = d; renderizar(); });
+carregarDados().then(async (d) => {
+  dados = d;
+  await carregarMaisEscutadas();
+  // Pré-carrega as fotos dos artistas do top para que htmlMaisEscutadas()
+  // já as encontre em FOTOS no segundo renderizar().
+  await Promise.all(
+    [...new Set(maisEscutadas.map((f) => f.a))]
+      .filter((nome) => FOTOS[nome] === undefined)
+      .map(async (nome) => {
+        FOTOS[nome] = null;
+        FOTOS[nome] = await buscarFoto(nome);
+      })
+  );
+  renderizar();
+});

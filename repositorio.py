@@ -119,3 +119,36 @@ def apagar_usuario(usuario_id):
     """Apaga o usuário e tudo dele. Devolve True, ou False se não existia."""
     with _lock:
         return _usuarios.pop(usuario_id, None) is not None
+
+
+# ---------------------------------------------------------------------
+# Visualizações de faixas
+# ---------------------------------------------------------------------
+# Chave: "titulo|artista" em minúsculas.
+# Valor: { "t": titulo, "a": artista, "c": capa, "u": preview_url, "visualizacoes": int }
+_visualizacoes: dict = {}
+_vis_lock = threading.Lock()
+
+
+def incrementar_visualizacao(titulo: str, artista: str, capa: str = "", url: str = "") -> int:
+    """Incrementa a contagem de visualizações da faixa e devolve o novo total.
+    Se a faixa ainda não existe no registro, cria com valor 1."""
+    chave = f"{titulo.lower()}|{artista.lower()}"
+    with _vis_lock:
+        if chave not in _visualizacoes:
+            _visualizacoes[chave] = {"t": titulo, "a": artista, "c": capa, "u": url, "visualizacoes": 0}
+        reg = _visualizacoes[chave]
+        # Atualiza capa e URL se foram informadas e ainda estão vazias.
+        if capa and not reg["c"]:
+            reg["c"] = capa
+        if url and not reg["u"]:
+            reg["u"] = url
+        reg["visualizacoes"] += 1
+        return reg["visualizacoes"]
+
+
+def listar_mais_visualizadas(limite: int = 10) -> list:
+    """Devolve as `limite` faixas mais visualizadas, em ordem decrescente."""
+    with _vis_lock:
+        ordenadas = sorted(_visualizacoes.values(), key=lambda x: x["visualizacoes"], reverse=True)
+        return [dict(r) for r in ordenadas[:limite]]

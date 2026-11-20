@@ -460,5 +460,34 @@ def banda(nome):
     return (jsonify(dados), 200) if dados else erro("Banda não encontrada.", 404)
 
 
+# ---------------------------------------------------------------------
+# Visualizações de faixas
+# ---------------------------------------------------------------------
+@app.post("/api/visualizacao")
+def registrar_visualizacao():
+    """Incrementa a contagem de visualizações de uma faixa.
+    Corpo JSON: { t: título, a: artista, c: capa (opcional), u: url_prévia (opcional) }
+    """
+    d = corpo_json()
+    titulo = str(d.get("t") or "").strip()[:300]
+    artista = str(d.get("a") or "").strip()[:200]
+    if not titulo or not artista:
+        return erro("Título e artista são obrigatórios.", 400)
+    capa = str(d.get("c") or "").strip()[:600]
+    url = str(d.get("u") or "").strip()[:600]
+    total = repositorio.incrementar_visualizacao(titulo, artista, capa, url)
+    return jsonify({"ok": True, "visualizacoes": total})
+
+
+@app.get("/api/mais-escutadas")
+def mais_escutadas():
+    """Retorna o top de músicas mais visualizadas.
+    Parâmetro opcional: limit (1–50, padrão 10).
+    """
+    limite = min(max(request.args.get("limit", default=10, type=int), 1), 50)
+    lista = repositorio.listar_mais_visualizadas(limite)
+    return jsonify(lista)
+
+
 if __name__ == "__main__":
     app.run(debug=True)
