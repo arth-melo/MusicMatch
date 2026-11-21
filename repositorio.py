@@ -1,231 +1,154 @@
 """
-repositorio.py - camada de armazenamento do MusicMatch (PostgreSQL).
+repositorio.py - camada de armazenamento do MusicMatch.
 
-Este é o ÚNICO arquivo que fala com o banco. O app.py chama as funções
-abaixo e não sabe nada de SQL. Os nomes, os argumentos e o que cada função
-devolve são os mesmos da versão em memória.
+>>> VERSÃO PROVISÓRIA, EM MEMÓRIA. <<<
+Os dados somem quando o Flask reinicia (com --debug isso acontece a cada
+arquivo salvo). Serve para testar o front enquanto o banco não existe.
 
-Conexão: variável DATABASE_URL (arquivo .env), no formato
-    postgresql://postgres:SUA_SENHA@localhost:5432/musicmatch
-
-Tabelas usadas (ver o .sql do projeto):
-    usuarios, usuario_generos, bandas_favoritas, bandas_salvas,
-    playlists, playlist_faixas, historico
-(artistas, albuns e musicas existem no banco, mas o site não as usa.)
+PARA QUEM FOR FAZER O BANCO
+---------------------------
+Troque o corpo das funções abaixo (e só delas). O app.py NÃO acessa o
+armazenamento de nenhum outro jeito, então nada além deste arquivo muda.
+Mantenha EXATAMENTE os nomes, os argumentos e o que cada função devolve.
 
 Formato do usuário (dict) devolvido pelas funções:
 
     {
-      "id": int, "nome": str, "email": str (minúsculas), "senha_hash": str,
-      "foto": str, "bio": str,
-      "gen":  list[str],            # gêneros, na ordem em que foram escolhidos
-      "fav":  list[str],            # bandas favoritas, na ordem
-      "sav":  list[str],            # bandas salvas, na ordem
-      "pl":   list[dict],           # {"id": str, "nome": str, "t": [{"t","a","u","c"}]}
-      "hist": list[dict],           # {"n": banda, "t": ms} na ordem em que foi enviado
+      "id":         int,          # único, gerado pelo banco
+      "nome":       str,          # 1 a 40 caracteres
+      "email":      str,          # já em minúsculas; ÚNICO (UNIQUE no banco)
+      "senha_hash": str,          # hash do werkzeug (generate_password_hash)
+      "foto":       str,          # "" ou data URL "data:image/jpeg;base64,..."
+      "bio":        str,          # até 140 caracteres
+      "gen":        list[str],    # gêneros escolhidos
+      "fav":        list[str],    # nomes de bandas favoritas
+      "sav":        list[str],    # nomes de bandas salvas
+      "pl":         list[dict],   # playlists: {"id": str, "nome": str, "t": [faixas]}
+      "hist":       list[dict],   # histórico: {"n": nome da banda, "t": timestamp em ms}
     }
 
-Regras:
-  * e-mail único -> EmailJaCadastrado (o banco garante com UNIQUE);
-  * as funções devolvem dados novos a cada chamada (nada compartilhado);
-  * quem não existe devolve None / False.
-"""
-import os
+Sugestão para o banco: uma tabela `usuarios` com id, nome, email (UNIQUE),
+senha_hash, foto, bio, e as cinco listas (gen, fav, sav, pl, hist) em colunas
+de TEXTO guardando JSON (json.dumps / json.loads). Assim o formato que o front
+espera volta idêntico, sem precisar quebrar as playlists em várias tabelas.
+Os ids de playlist são TEXTO (o front compara com data-id). Não troque por inteiro.
 
-import psycopg
-from psycopg.errors import UniqueViolation
-from psycopg.rows import dict_row
+Regras que o banco precisa garantir:
+  * e-mail único: levantar EmailJaCadastrado (inclusive em disputa entre
+    dois pedidos ao mesmo tempo, ex.: capturando IntegrityError);
+  * as funções devolvem COPIAS; o app nunca altera o dict devolvido
+    esperando que isso grave algo;
+  * quem não existe devolve None / False (o app decide o que responder).
+"""
+import copy
+import threading
 
 
 class EmailJaCadastrado(Exception):
     """O e-mail já pertence a outra conta."""
 
 
-def _conectar():
-    """Abre uma conexão nova. A URL é lida aqui (e não no import) porque o
-    app.py só carrega o .env DEPOIS de importar este módulo."""
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL não definida. Coloque no arquivo .env.")
-    return psycopg.connect(url, row_factory=dict_row)
+_lock = threading.Lock()   # o servidor de desenvolvimento atende pedidos em threads
+_usuarios = {}             # id -> dict do usuário
+_proximo_id = 1
 
 
-# ---------------------------------------------------------------------
-# Leitura: monta o dict do usuário juntando as tabelas
-# ---------------------------------------------------------------------
-def _montar_usuario(cur, linha):
-    uid = linha["id"]
-
-    def lista(sql):
-        cur.execute(sql, (uid,))
-        return [r["v"] for r in cur.fetchall()]
-
-    usuario = {
-        "id": uid,
-        "nome": linha["nome"],
-        "email": linha["email"],
-        "senha_hash": linha["senha_hash"],
-        "foto": linha["foto"],
-        "bio": linha["bio"],
-        "gen": lista("SELECT genero AS v FROM usuario_generos WHERE usuario_id = %s ORDER BY posicao"),
-        "fav": lista("SELECT banda AS v FROM bandas_favoritas WHERE usuario_id = %s ORDER BY posicao"),
-        "sav": lista("SELECT banda AS v FROM bandas_salvas WHERE usuario_id = %s ORDER BY posicao"),
-    }
-
-    # Playlists (id TEXTO, como o front espera) e suas faixas, em duas consultas
-    cur.execute(
-        "SELECT id, nome FROM playlists WHERE usuario_id = %s ORDER BY posicao", (uid,))
-    playlists = [{"id": r["id"], "nome": r["nome"], "t": []} for r in cur.fetchall()]
-    por_id = {p["id"]: p for p in playlists}
-    cur.execute(
-        "SELECT playlist_id, titulo, artista, audio_url, capa_url "
-        "FROM playlist_faixas WHERE usuario_id = %s ORDER BY playlist_id, posicao", (uid,))
-    for r in cur.fetchall():
-        por_id[r["playlist_id"]]["t"].append(
-            {"t": r["titulo"], "a": r["artista"], "u": r["audio_url"], "c": r["capa_url"]})
-    usuario["pl"] = playlists
-
-    cur.execute(
-        "SELECT banda, visto_em FROM historico WHERE usuario_id = %s ORDER BY id", (uid,))
-    usuario["hist"] = [{"n": r["banda"], "t": r["visto_em"]} for r in cur.fetchall()]
-    return usuario
-
-
-def _buscar(condicao, valor):
-    with _conectar() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT * FROM usuarios WHERE {condicao} = %s", (valor,))
-        linha = cur.fetchone()
-        return _montar_usuario(cur, linha) if linha else None
+def criar_usuario(nome, email, senha_hash):
+    """Cria o usuário (listas vazias, foto e bio vazias) e devolve o dict.
+    Levanta EmailJaCadastrado se o e-mail já existe."""
+    global _proximo_id
+    with _lock:
+        if any(u["email"] == email for u in _usuarios.values()):
+            raise EmailJaCadastrado(email)
+        usuario = {
+            "id": _proximo_id, "nome": nome, "email": email,
+            "senha_hash": senha_hash, "foto": "", "bio": "",
+            "gen": [], "fav": [], "sav": [], "pl": [], "hist": [],
+        }
+        _usuarios[_proximo_id] = usuario
+        _proximo_id += 1
+        return copy.deepcopy(usuario)
 
 
 def buscar_por_email(email):
     """Devolve o usuário com esse e-mail (já em minúsculas) ou None."""
-    return _buscar("email", email)
+    with _lock:
+        for usuario in _usuarios.values():
+            if usuario["email"] == email:
+                return copy.deepcopy(usuario)
+    return None
 
 
 def buscar_por_id(usuario_id):
     """Devolve o usuário com esse id ou None."""
-    return _buscar("id", usuario_id)
-
-
-# ---------------------------------------------------------------------
-# Escrita
-# ---------------------------------------------------------------------
-def criar_usuario(nome, email, senha_hash):
-    """Cria o usuário (listas vazias, foto e bio vazias) e devolve o dict.
-    Levanta EmailJaCadastrado se o e-mail já existe."""
-    try:
-        with _conectar() as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO usuarios (nome, email, senha_hash) VALUES (%s, %s, %s) RETURNING *",
-                (nome, email, senha_hash))
-            return _montar_usuario(cur, cur.fetchone())
-    except UniqueViolation:
-        raise EmailJaCadastrado(email)
+    with _lock:
+        usuario = _usuarios.get(usuario_id)
+        return copy.deepcopy(usuario) if usuario else None
 
 
 def atualizar_perfil(usuario_id, nome, email, bio, senha_hash=None):
     """Atualiza nome, e-mail e bio. Se senha_hash não for None, troca a senha.
-    Levanta EmailJaCadastrado se o e-mail já é de OUTRA conta.
-    Devolve o usuário atualizado, ou None se o id não existe."""
-    try:
-        with _conectar() as conn, conn.cursor() as cur:
-            if senha_hash is None:
-                cur.execute(
-                    "UPDATE usuarios SET nome = %s, email = %s, bio = %s "
-                    "WHERE id = %s RETURNING *", (nome, email, bio, usuario_id))
-            else:
-                cur.execute(
-                    "UPDATE usuarios SET nome = %s, email = %s, bio = %s, senha_hash = %s "
-                    "WHERE id = %s RETURNING *", (nome, email, bio, senha_hash, usuario_id))
-            linha = cur.fetchone()
-            return _montar_usuario(cur, linha) if linha else None
-    except UniqueViolation:
-        raise EmailJaCadastrado(email)
-
-
-def _sem_repetidos(itens, limite=None):
-    """Tira repetidos mantendo a ordem (as tabelas têm chave única por item)."""
-    vistos, saida = set(), []
-    for x in itens:
-        x = x[:limite] if limite else x
-        if x not in vistos:
-            vistos.add(x)
-            saida.append(x)
-    return saida
+    Levanta EmailJaCadastrado se o e-mail já é de OUTRA conta (o próprio
+    usuário pode manter o e-mail que já tem). Devolve o usuário atualizado,
+    ou None se o id não existe."""
+    with _lock:
+        usuario = _usuarios.get(usuario_id)
+        if not usuario:
+            return None
+        if any(u["email"] == email and u["id"] != usuario_id for u in _usuarios.values()):
+            raise EmailJaCadastrado(email)
+        usuario.update(nome=nome, email=email, bio=bio)
+        if senha_hash is not None:
+            usuario["senha_hash"] = senha_hash
+        return copy.deepcopy(usuario)
 
 
 def salvar_dados(usuario_id, dados):
     """Substitui gen, fav, sav, pl, hist e foto pelos valores de `dados`
-    (já validados pelo app.py). Apaga o que havia e grava de novo, tudo numa
-    transação: ou grava tudo, ou nada. Devolve True, ou False se o id não existe."""
-    with _conectar() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE usuarios SET foto = %s WHERE id = %s", (dados["foto"], usuario_id))
-        if cur.rowcount == 0:
+    (já validados pelo app.py). Devolve True, ou False se o id não existe."""
+    with _lock:
+        usuario = _usuarios.get(usuario_id)
+        if not usuario:
             return False
-
-        # Apaga tudo do usuário (playlist_faixas some junto, por ON DELETE CASCADE)
-        for tabela in ("usuario_generos", "bandas_favoritas", "bandas_salvas",
-                       "playlists", "historico"):
-            cur.execute(f"DELETE FROM {tabela} WHERE usuario_id = %s", (usuario_id,))
-
-        # genero é VARCHAR(50) no banco
-        cur.executemany(
-            "INSERT INTO usuario_generos (usuario_id, genero, posicao) VALUES (%s, %s, %s)",
-            [(usuario_id, g, i) for i, g in enumerate(_sem_repetidos(dados["gen"], 50))])
-        cur.executemany(
-            "INSERT INTO bandas_favoritas (usuario_id, banda, posicao) VALUES (%s, %s, %s)",
-            [(usuario_id, b, i) for i, b in enumerate(_sem_repetidos(dados["fav"]))])
-        cur.executemany(
-            "INSERT INTO bandas_salvas (usuario_id, banda, posicao) VALUES (%s, %s, %s)",
-            [(usuario_id, b, i) for i, b in enumerate(_sem_repetidos(dados["sav"]))])
-
-        for pos, p in enumerate(dados["pl"]):
-            cur.execute(
-                "INSERT INTO playlists (usuario_id, id, nome, posicao) VALUES (%s, %s, %s, %s)",
-                (usuario_id, p["id"], p["nome"], pos))
-            # Faixas no formato antigo {n, i} não têm título/artista: são ignoradas
-            faixas = [f for f in p["t"] if "t" in f]
-            cur.executemany(
-                "INSERT INTO playlist_faixas "
-                "(usuario_id, playlist_id, posicao, titulo, artista, audio_url, capa_url) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                [(usuario_id, p["id"], i, f["t"], f["a"], f["u"], f["c"])
-                 for i, f in enumerate(faixas)])
-
-        cur.executemany(
-            "INSERT INTO historico (usuario_id, banda, visto_em) VALUES (%s, %s, %s)",
-            [(usuario_id, h["n"], int(h["t"])) for h in dados["hist"]])
+        for campo in ("gen", "fav", "sav", "pl", "hist", "foto"):
+            usuario[campo] = copy.deepcopy(dados[campo])
         return True
 
 
 def apagar_usuario(usuario_id):
-    """Apaga o usuário e tudo dele (as outras tabelas caem por ON DELETE CASCADE).
-    Devolve True, ou False se não existia."""
-    with _conectar() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
-        return cur.rowcount > 0
+    """Apaga o usuário e tudo dele. Devolve True, ou False se não existia."""
+    with _lock:
+        return _usuarios.pop(usuario_id, None) is not None
 
-def listar_mais_visualizadas(limite=10):
-    """Retorna o top de itens mais visualizados no histórico."""
-    with _conectar() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT banda, COUNT(*) AS visualizacoes
-            FROM historico
-            GROUP BY banda
-            ORDER BY visualizacoes DESC, banda ASC
-            LIMIT %s
-            """,
-            (limite,),
-        )
-        return [
-            {
-                "t": r["banda"],
-                "a": r["banda"],
-                "visualizacoes": r["visualizacoes"],
-                "c": "",
-                "u": "",
-            }
-            for r in cur.fetchall()
-        ]
+
+# ---------------------------------------------------------------------
+# Visualizações de faixas
+# ---------------------------------------------------------------------
+# Chave: "titulo|artista" em minúsculas.
+# Valor: { "t": titulo, "a": artista, "c": capa, "u": preview_url, "visualizacoes": int }
+_visualizacoes: dict = {}
+_vis_lock = threading.Lock()
+
+
+def incrementar_visualizacao(titulo: str, artista: str, capa: str = "", url: str = "") -> int:
+    """Incrementa a contagem de visualizações da faixa e devolve o novo total.
+    Se a faixa ainda não existe no registro, cria com valor 1."""
+    chave = f"{titulo.lower()}|{artista.lower()}"
+    with _vis_lock:
+        if chave not in _visualizacoes:
+            _visualizacoes[chave] = {"t": titulo, "a": artista, "c": capa, "u": url, "visualizacoes": 0}
+        reg = _visualizacoes[chave]
+        # Atualiza capa e URL se foram informadas e ainda estão vazias.
+        if capa and not reg["c"]:
+            reg["c"] = capa
+        if url and not reg["u"]:
+            reg["u"] = url
+        reg["visualizacoes"] += 1
+        return reg["visualizacoes"]
+
+
+def listar_mais_visualizadas(limite: int = 10) -> list:
+    """Devolve as `limite` faixas mais visualizadas, em ordem decrescente."""
+    with _vis_lock:
+        ordenadas = sorted(_visualizacoes.values(), key=lambda x: x["visualizacoes"], reverse=True)
+        return [dict(r) for r in ordenadas[:limite]]
